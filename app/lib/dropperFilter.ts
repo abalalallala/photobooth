@@ -4,7 +4,7 @@ import {
   FilesetResolver,
 } from "@mediapipe/tasks-vision";
 
-export const FILTER_VERSION = 6;
+export const FILTER_VERSION = 7;
 export type FilterMode = 1 | 2;
 
 export interface TrackedFace {
@@ -300,7 +300,12 @@ float computeSkinLikelihood(vec3 rgb) {
 
 void main() {
   vec2 startPos = v_uv * u_resolution;
-  WarpResult wr = (u_mode == 2) ? warpMode2(startPos) : warpMode1(startPos);
+  WarpResult wr;
+  if (u_mode == 2) {
+    wr = warpMode2(startPos);
+  } else {
+    wr = warpMode1(startPos);
+  }
 
   vec2 warpedUV = wr.pos / u_resolution;
   vec2 videoUV = vec2(
@@ -378,6 +383,7 @@ function compileShader(
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error("WebGL shader compile error:", gl.getShaderInfoLog(shader));
     gl.deleteShader(shader);
     return null;
   }
@@ -389,6 +395,7 @@ export class DropperFilterRenderer {
   private gl: WebGLRenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private texture: WebGLTexture | null = null;
+  private compiledVersion = 0;
 
   private uResolutionLoc: WebGLUniformLocation | null = null;
   private uCropScaleLoc: WebGLUniformLocation | null = null;
@@ -470,6 +477,7 @@ export class DropperFilterRenderer {
     this.uFacesLoc = gl.getUniformLocation(program, "u_faces");
     this.uEyesLoc = gl.getUniformLocation(program, "u_eyes");
     this.uAnglesLoc = gl.getUniformLocation(program, "u_angles");
+    this.compiledVersion = FILTER_VERSION;
   }
 
   private async initVisionModels() {
@@ -770,6 +778,9 @@ export class DropperFilterRenderer {
   }
 
   public render(video: HTMLVideoElement, mode: FilterMode = 2) {
+    if (this.compiledVersion !== FILTER_VERSION || !this.program) {
+      this.initWebGL();
+    }
     const gl = this.gl;
     if (!gl || !this.program || !this.texture || video.readyState < 2) return;
 
