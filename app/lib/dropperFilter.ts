@@ -4,7 +4,8 @@ import {
   FilesetResolver,
 } from "@mediapipe/tasks-vision";
 
-export const FILTER_VERSION = 5;
+export const FILTER_VERSION = 6;
+export type FilterMode = 1 | 2;
 
 export interface TrackedFace {
   /** Center between the eyes (nasion, landmark 168) in canvas pixel coordinates */
@@ -43,6 +44,7 @@ varying vec2 v_uv;
 uniform sampler2D u_video;
 uniform vec2 u_resolution;
 uniform vec2 u_cropScale;
+uniform int u_mode;
 uniform int u_faceCount;
 uniform vec4 u_faces[${MAX_FACES}];  // (cx, cy, rx, ry)
 uniform vec4 u_eyes[${MAX_FACES}];   // (leftEyeLx, leftEyeLy, rightEyeLx, rightEyeLy)
@@ -55,7 +57,7 @@ struct WarpResult {
   float lipRegion;
 };
 
-WarpResult warpAndMask(vec2 pos) {
+WarpResult warpMode1(vec2 pos) {
   WarpResult res;
   res.pos = pos;
   res.faceSkinRegion = 0.0;
@@ -85,21 +87,16 @@ WarpResult warpAndMask(vec2 pos) {
         float srcLx = lx;
         float srcLy = ly;
 
-        // 1. Gentle upper hair crown fullness without bloating the forehead
         vec2 dCrown = vec2(lx, ly - (-0.75));
         float crownEnv = exp(-(dCrown.x * dCrown.x) / (1.35 * 1.35) - (dCrown.y * dCrown.y) / (0.85 * 0.85))
                        * smoothstep(0.0, -0.38, ly);
         srcLx -= dCrown.x * 0.11 * crownEnv;
         srcLy -= dCrown.y * 0.10 * crownEnv;
 
-        // 2. Moderate Face Elongation & Pointed V-Chin
         float lengthenEnv = exp(-pow(lx / 1.20, 2.0) - pow((ly - 0.90) / 0.72, 2.0)) * smoothstep(-0.05, 0.22, ly);
         float centerTipWeight = exp(-pow(lx / 0.45, 2.0));
         srcLy -= (0.12 + 0.15 * centerTipWeight) * lengthenEnv;
 
-        // 3. Dramatic V-Cone Cheek & Jaw Taper that preserves clear central facial features (eyes, nose, mouth)
-        // wCore is kept wide enough (0.48 -> 0.34) so the nose and mouth in the center are not crushed,
-        // while the outer cheeks and jaw corners (|lx| ~ 0.4..1.1) are pulled strongly inward.
         float effLy = srcLy;
         float vStart = smoothstep(-0.08, 0.25, effLy);
         float vMidCheek = smoothstep(0.06, 0.55, effLy);
@@ -115,17 +112,14 @@ WarpResult warpAndMask(vec2 pos) {
 
         srcLx += deltaMax * coreRatio * outerEnvelope;
 
-        // 4. Refined Slender Nose (keeps nostrils & bridge clearly defined)
         float noseEnv = exp(-pow(lx / 0.34, 2.0) - pow((effLy - 0.36) / 0.22, 2.0)) * smoothstep(0.04, 0.16, effLy);
         srcLx += lx * 0.36 * noseEnv;
 
-        // 5. Slightly Petite Mouth (preserves clear lip shape)
         vec2 dMouth = vec2(lx, effLy - 0.68);
         float mouthEnv = exp(-pow(dMouth.x / 0.34, 2.0) - pow(dMouth.y / 0.16, 2.0));
         srcLx += dMouth.x * 0.22 * mouthEnv;
         srcLy += dMouth.y * 0.16 * mouthEnv;
 
-        // 6. Expressive Enlarged Eyes
         vec2 dEyeL = vec2(lx - eyes.x, (ly - eyes.y) * (ry / rx));
         float eyeEnvL = exp(-dot(dEyeL, dEyeL) / (0.36 * 0.36));
         srcLx -= (lx - eyes.x) * 0.30 * eyeEnvL;
@@ -138,7 +132,6 @@ WarpResult warpAndMask(vec2 pos) {
 
         res.pos = center + (srcLx * rx) * rightVec + (srcLy * ry) * downVec;
 
-        // Face & neck skin region mask
         float foreheadOval = exp(-pow(srcLx / 1.10, 2.0) - pow((effLy - (-0.32)) / 0.55, 2.0));
         float faceOval = exp(-pow(srcLx / 1.12, 2.0) - pow((effLy - 0.32) / 0.88, 2.0));
         float neckArea = exp(-pow(srcLx / 1.05, 2.0) - pow((effLy - 1.32) / 0.75, 2.0));
@@ -147,7 +140,6 @@ WarpResult warpAndMask(vec2 pos) {
           clamp(max(max(foreheadOval, faceOval), neckArea * 0.85), 0.0, 1.0)
         );
 
-        // Protect eyes, eyebrows, nostrils, and lips so facial features remain crisp and never wash out
         float eyeProtectL = exp(-dot(dEyeL, dEyeL) / (0.28 * 0.28));
         float eyeProtectR = exp(-dot(dEyeR, dEyeR) / (0.28 * 0.28));
         float browProtect = exp(-pow(srcLx / 0.75, 2.0) - pow((effLy - (-0.16)) / 0.11, 2.0));
@@ -166,6 +158,133 @@ WarpResult warpAndMask(vec2 pos) {
   return res;
 }
 
+// Mode 2: 1:1 Exact Match for the Reference Image
+// - Puffed upper hair & cranium bulb
+// - 45-degree sticking-out pointed elf ears
+// - Cheek-ring V-cone compression: sucks in the cheek flesh & jawbone (|lx| in 0.22..1.05) into a razor-straight V-line
+//   while leaving the central column (eyes, nose, philtrum, mouth) completely clear and un-crushed!
+// - Ultra-thin pinched upper neck flaring into the trapezius
+WarpResult warpMode2(vec2 pos) {
+  WarpResult res;
+  res.pos = pos;
+  res.faceSkinRegion = 0.0;
+  res.featureProtect = 0.0;
+  res.lipRegion = 0.0;
+
+  for (int i = 0; i < ${MAX_FACES}; i++) {
+    if (i < u_faceCount) {
+      vec4 face = u_faces[i];
+      vec4 eyes = u_eyes[i];
+      float angle = u_angles[i];
+
+      vec2 center = face.xy;
+      float rx = max(face.z, 1.0);
+      float ry = max(face.w, 1.0);
+
+      float c = cos(angle);
+      float s = sin(angle);
+      vec2 rightVec = vec2(c, s);
+      vec2 downVec = vec2(-s, c);
+
+      vec2 rel = res.pos - center;
+      float lx = dot(rel, rightVec) / rx;
+      float ly = dot(rel, downVec) / ry;
+
+      if (abs(lx) <= 2.9 && ly >= -2.5 && ly <= 2.6) {
+        float srcLx = lx;
+        float srcLy = ly;
+        float ax = abs(lx);
+
+        // 1. Big Fluffy Hair & Upper Cranium Bulb (ly < -0.05)
+        vec2 dCrown = vec2(lx, ly - (-0.70));
+        float crownEnv = exp(-(dCrown.x * dCrown.x) / (1.48 * 1.48) - (dCrown.y * dCrown.y) / (1.05 * 1.05))
+                       * smoothstep(0.08, -0.32, ly);
+        srcLx -= dCrown.x * 0.25 * crownEnv;
+        srcLy -= dCrown.y * 0.26 * crownEnv;
+
+        // 2. 45-Degree Pointed Elf Ears Flare (upper-outer ear region: |lx| ~ 0.86, ly ~ 0.20)
+        // Pushes the upper tip of the ears outward and tilts them upward while the cheek below caves in!
+        float earDx = ax - 0.86;
+        float earDy = ly - 0.20;
+        float earFlare = exp(-(earDx * earDx) / (0.36 * 0.36) - (earDy * earDy) / (0.18 * 0.18))
+                       * smoothstep(0.42, 0.65, ax);
+        srcLx -= sign(lx) * 0.28 * earFlare;
+        srcLy += 0.14 * earFlare;
+
+        // 3.Jaw-Side V-Lift & Sharp Pointed Chin Tip
+        // Lifts the left/right jaw corners upward while keeping the chin tip pointed at lx = 0
+        float jawLiftZone = exp(-pow(lx / 0.95, 2.0) - pow((ly - 0.80) / 0.42, 2.0)) * smoothstep(0.15, 0.40, ly);
+        float sideOnlyLift = smoothstep(0.10, 0.48, ax);
+        srcLy += (0.06 + 0.18 * sideOnlyLift) * jawLiftZone;
+
+        float effLy = srcLy;
+
+        // 4. Cheek-Ring V-Cone Compression (The core secret of the reference image!)
+        // Instead of crushing lx = 0 (which ruins the nose & mouth), cheekRing is 0 at lx = 0
+        // and strongly compresses the cheek flesh & jawbone (|lx| in 0.18..1.05) into a steep diagonal V!
+        float vCheekStart = smoothstep(0.02, 0.38, effLy);
+        float vJawPeak = exp(-pow((effLy - 0.78) / 0.44, 2.0));
+        float vChinTip = exp(-pow((effLy - 0.98) / 0.24, 2.0));
+        float vNeckPinch = exp(-pow((effLy - 1.18) / 0.26, 2.0));
+        float vBottomFade = 1.0 - smoothstep(1.22, 1.75, effLy);
+
+        // Gentle central slimming so nose & mouth stay 100% clear and proportional
+        float centerSlim = (0.18 * vCheekStart + 0.14 * vJawPeak) * vBottomFade * exp(-pow(ax / 1.6, 2.0));
+        srcLx += lx * centerSlim;
+
+        // Strong inward pull on the outer cheeks, jawline, chin sides, and upper neck
+        float ringOnset = smoothstep(0.06, 0.36, ax);
+        float chinNarrowOnset = smoothstep(0.03, 0.20, ax) * (vChinTip + 0.8 * vNeckPinch);
+        float outerDecay = exp(-pow(ax / 2.15, 2.0));
+
+        float pullAmount = (0.34 * vCheekStart + 0.44 * vJawPeak) * ringOnset
+                         + 0.32 * chinNarrowOnset;
+        srcLx += sign(lx) * pullAmount * vBottomFade * outerDecay;
+
+        // 5. Straight Slender Nose Bridge (with intact nostrils)
+        float noseBridgeEnv = exp(-pow(lx / 0.28, 2.0) - pow((effLy - 0.28) / 0.18, 2.0)) * smoothstep(0.02, 0.14, effLy);
+        srcLx += lx * 0.42 * noseBridgeEnv;
+
+        // 6. Big Dark Expressive Almond Eyes (with subtle outer-corner droop like the reference)
+        vec2 dEyeL = vec2(lx - eyes.x, (ly - eyes.y) * (ry / rx));
+        float eyeEnvL = exp(-dot(dEyeL, dEyeL) / (0.38 * 0.38));
+        srcLx -= (lx - eyes.x) * 0.35 * eyeEnvL;
+        srcLy -= (ly - eyes.y) * 0.38 * eyeEnvL;
+
+        vec2 dEyeR = vec2(lx - eyes.z, (ly - eyes.w) * (ry / rx));
+        float eyeEnvR = exp(-dot(dEyeR, dEyeR) / (0.38 * 0.38));
+        srcLx -= (lx - eyes.z) * 0.35 * eyeEnvR;
+        srcLy -= (ly - eyes.w) * 0.38 * eyeEnvR;
+
+        res.pos = center + (srcLx * rx) * rightVec + (srcLy * ry) * downVec;
+
+        // Masks
+        float foreheadOval = exp(-pow(srcLx / 1.12, 2.0) - pow((effLy - (-0.32)) / 0.55, 2.0));
+        float faceOval = exp(-pow(srcLx / 1.12, 2.0) - pow((effLy - 0.32) / 0.88, 2.0));
+        float neckArea = exp(-pow(srcLx / 1.05, 2.0) - pow((effLy - 1.28) / 0.70, 2.0));
+        res.faceSkinRegion = max(
+          res.faceSkinRegion,
+          clamp(max(max(foreheadOval, faceOval), neckArea * 0.85), 0.0, 1.0)
+        );
+
+        float eyeProtectL = exp(-dot(dEyeL, dEyeL) / (0.30 * 0.30));
+        float eyeProtectR = exp(-dot(dEyeR, dEyeR) / (0.30 * 0.30));
+        float browProtect = exp(-pow(srcLx / 0.78, 2.0) - pow((effLy - (-0.16)) / 0.12, 2.0));
+        float nostrilProtect = exp(-pow(srcLx / 0.22, 2.0) - pow((effLy - 0.43) / 0.09, 2.0));
+        float lipProtect = exp(-pow(srcLx / 0.30, 2.0) - pow((effLy - 0.68) / 0.12, 2.0));
+
+        res.featureProtect = max(
+          res.featureProtect,
+          clamp(eyeProtectL + eyeProtectR + browProtect * 0.85 + nostrilProtect * 0.85 + lipProtect * 0.9, 0.0, 1.0)
+        );
+        res.lipRegion = max(res.lipRegion, lipProtect);
+      }
+    }
+  }
+
+  return res;
+}
+
 float computeSkinLikelihood(vec3 rgb) {
   float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
   float cb = -0.168736 * rgb.r - 0.331264 * rgb.g + 0.5 * rgb.b + 0.5;
@@ -175,14 +294,13 @@ float computeSkinLikelihood(vec3 rgb) {
   float dCr = (cr - 0.56) / 0.12;
   float chromaSkin = exp(-0.5 * (dCb * dCb + dCr * dCr));
 
-  // Keep dark features (eyes, brows, glasses, hair) and bright specular highlights untouched
   float lumaGate = smoothstep(0.14, 0.28, luma) * (1.0 - smoothstep(0.88, 0.98, luma));
   return chromaSkin * lumaGate;
 }
 
 void main() {
   vec2 startPos = v_uv * u_resolution;
-  WarpResult wr = warpAndMask(startPos);
+  WarpResult wr = (u_mode == 2) ? warpMode2(startPos) : warpMode1(startPos);
 
   vec2 warpedUV = wr.pos / u_resolution;
   vec2 videoUV = vec2(
@@ -194,18 +312,17 @@ void main() {
   vec3 centerCol = texture2D(u_video, videoUV).rgb;
   float centerLuma = dot(centerCol, vec3(0.299, 0.587, 0.114));
 
-  // --- STEP 1: Edge-Preserving Beauty Skin Smoothing (keeps eyes, brows, nose & lips sharp) ---
+  // Edge-preserving bilateral skin smoothing (smooths skin while keeping eyes, brows, nostrils & lips sharp)
   float resScale = max(1.0, min(u_resolution.x, u_resolution.y) / 540.0);
   vec2 texel = (u_cropScale * resScale) / max(u_resolution, vec2(1.0));
 
-  vec3 accum = centerCol * 1.4;
-  float weightSum = 1.4;
+  vec3 accum = centerCol * 1.2;
+  float weightSum = 1.2;
 
-  // Tight bilateral range sigma (0.028) so pores & skin texture smooth out while feature contours stay sharp
-  const float sigmaSq = 0.028;
+  const float sigmaSq = 0.032;
   for (int i = 0; i < 12; i++) {
     float ang = float(i) * 0.5235988;
-    float ring = (i < 6) ? 2.8 : 6.5;
+    float ring = (i < 6) ? 3.0 : 7.2;
     vec2 offset = vec2(cos(ang), sin(ang)) * ring * texel;
     vec3 sCol = texture2D(u_video, clamp(videoUV + offset, vec2(0.002), vec2(0.998))).rgb;
     vec3 diff = sCol - centerCol;
@@ -218,37 +335,34 @@ void main() {
   vec3 smoothCol = accum / weightSum;
 
   float colorSkin = computeSkinLikelihood(smoothCol);
-  float darkFeatureKeep = smoothstep(0.16, 0.30, centerLuma);
-  // Reduce skin mask over protected features (eyes, eyebrows, nostrils, lips) so they stay crisp
+  float darkFeatureKeep = smoothstep(0.15, 0.28, centerLuma);
   float skinMask = clamp(
-    max(colorSkin * 0.85, wr.faceSkinRegion * darkFeatureKeep * 0.90) * (1.0 - 0.78 * wr.featureProtect),
+    max(colorSkin * 0.85, wr.faceSkinRegion * darkFeatureKeep * 0.92) * (1.0 - 0.80 * wr.featureProtect),
     0.0,
     1.0
   );
 
-  // Smooth pores while retaining 3D facial shading
-  vec3 poreSmoothed = mix(centerCol, smoothCol, 0.84 * skinMask);
+  vec3 poreSmoothed = mix(centerCol, smoothCol, 0.88 * skinMask);
 
-  // --- STEP 2: Balanced Cold-Porcelain Brightening (never blows out highlights or washes out features) ---
-  // Soft logarithmic lift with highlight protection (1.0 - luma) so skin brightens without clipping to white
-  vec3 logWhite = log(1.0 + poreSmoothed * 2.8) / log(3.8);
-  float highlightGuard = 1.0 - smoothstep(0.68, 0.92, centerLuma) * 0.55;
-  vec3 whitened = mix(poreSmoothed, logWhite, 0.62 * skinMask * highlightGuard);
+  // Soft beauty brightening with highlight protection so features and 3D contours stay clear
+  float brightenStrength = (u_mode == 2) ? 0.48 : 0.62;
+  vec3 logWhite = log(1.0 + poreSmoothed * 2.5) / log(3.5);
+  float highlightGuard = 1.0 - smoothstep(0.65, 0.90, centerLuma) * 0.60;
+  vec3 whitened = mix(poreSmoothed, logWhite, brightenStrength * skinMask * highlightGuard);
 
-  // Subtle cool porcelain tone (reduces yellow cast without flattening contrast)
   float wLuma = dot(whitened, vec3(0.299, 0.587, 0.114));
-  vec3 deYellowed = mix(whitened, vec3(wLuma), 0.24 * skinMask);
-  vec3 coldPorcelain = deYellowed * mix(vec3(1.0), vec3(1.03, 1.00, 1.06), skinMask)
-                     + vec3(0.022, 0.018, 0.032) * skinMask * highlightGuard;
+  vec3 deYellowed = mix(whitened, vec3(wLuma), 0.20 * skinMask);
+  vec3 coldPorcelain = deYellowed * mix(vec3(1.0), vec3(1.02, 1.00, 1.04), skinMask)
+                     + vec3(0.016, 0.012, 0.022) * skinMask * highlightGuard;
 
-  // Subtle rosy lip enhancement
+  // Subtle rosy lip definition
   float lipMask = wr.lipRegion * smoothstep(0.14, 0.32, centerLuma);
   vec3 rosyLip = vec3(
-    min(1.0, coldPorcelain.r * 1.09 + 0.03),
-    coldPorcelain.g * 0.90,
-    coldPorcelain.b * 0.94
+    min(1.0, coldPorcelain.r * 1.10 + 0.03),
+    coldPorcelain.g * 0.89,
+    coldPorcelain.b * 0.93
   );
-  vec3 finalCol = mix(coldPorcelain, rosyLip, 0.45 * lipMask);
+  vec3 finalCol = mix(coldPorcelain, rosyLip, 0.48 * lipMask);
 
   gl_FragColor = vec4(clamp(finalCol, 0.0, 1.0), 1.0);
 }
@@ -278,6 +392,7 @@ export class DropperFilterRenderer {
 
   private uResolutionLoc: WebGLUniformLocation | null = null;
   private uCropScaleLoc: WebGLUniformLocation | null = null;
+  private uModeLoc: WebGLUniformLocation | null = null;
   private uFaceCountLoc: WebGLUniformLocation | null = null;
   private uFacesLoc: WebGLUniformLocation | null = null;
   private uEyesLoc: WebGLUniformLocation | null = null;
@@ -350,6 +465,7 @@ export class DropperFilterRenderer {
 
     this.uResolutionLoc = gl.getUniformLocation(program, "u_resolution");
     this.uCropScaleLoc = gl.getUniformLocation(program, "u_cropScale");
+    this.uModeLoc = gl.getUniformLocation(program, "u_mode");
     this.uFaceCountLoc = gl.getUniformLocation(program, "u_faceCount");
     this.uFacesLoc = gl.getUniformLocation(program, "u_faces");
     this.uEyesLoc = gl.getUniformLocation(program, "u_eyes");
@@ -653,7 +769,7 @@ export class DropperFilterRenderer {
     }
   }
 
-  public render(video: HTMLVideoElement) {
+  public render(video: HTMLVideoElement, mode: FilterMode = 2) {
     const gl = this.gl;
     if (!gl || !this.program || !this.texture || video.readyState < 2) return;
 
@@ -690,6 +806,7 @@ export class DropperFilterRenderer {
 
     gl.uniform2f(this.uResolutionLoc, displayW, displayH);
     gl.uniform2f(this.uCropScaleLoc, scaleX, scaleY);
+    gl.uniform1i(this.uModeLoc, mode);
 
     const faceCount = Math.min(this.smoothedFaces.length, MAX_FACES);
     gl.uniform1i(this.uFaceCountLoc, faceCount);

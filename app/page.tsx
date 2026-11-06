@@ -1,7 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { DropperFilterRenderer, FILTER_VERSION } from "./lib/dropperFilter";
+import {
+  DropperFilterRenderer,
+  FILTER_VERSION,
+  type FilterMode,
+} from "./lib/dropperFilter";
 
 type CameraState = "initializing" | "ready" | "denied" | "error";
 type BoothPhase = "camera" | "capturing" | "results";
@@ -20,9 +24,11 @@ export default function PhotoBoothPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const isMountedRef = useRef<boolean>(true);
   const captureCancelRef = useRef<boolean>(false);
+  const modeRef = useRef<FilterMode>(2);
 
   const [cameraState, setCameraState] = useState<CameraState>("initializing");
   const [phase, setPhase] = useState<BoothPhase>("camera");
+  const [mode, setMode] = useState<FilterMode>(2);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [countdownKey, setCountdownKey] = useState<number>(0);
   const [currentShot, setCurrentShot] = useState<number>(0);
@@ -30,6 +36,10 @@ export default function PhotoBoothPage() {
   const [stripUrl, setStripUrl] = useState<string | null>(null);
   const [stripFile, setStripFile] = useState<File | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<boolean>(false);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -112,7 +122,7 @@ export default function PhotoBoothPage() {
     let rafId = 0;
     const renderLoop = () => {
       if (videoRef.current && videoRef.current.readyState >= 2) {
-        renderer.render(videoRef.current);
+        renderer.render(videoRef.current, modeRef.current);
       }
       rafId = requestAnimationFrame(renderLoop);
     };
@@ -152,7 +162,7 @@ export default function PhotoBoothPage() {
     const video = videoRef.current;
 
     if (video && rendererRef.current && video.readyState >= 2) {
-      rendererRef.current.render(video);
+      rendererRef.current.render(video, modeRef.current);
     }
 
     const canvas = document.createElement("canvas");
@@ -398,7 +408,7 @@ export default function PhotoBoothPage() {
       {cameraState === "ready" && phase !== "results" && (
         <>
           <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/50 to-transparent" />
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-black/65 to-transparent" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/70 to-transparent" />
         </>
       )}
 
@@ -546,8 +556,34 @@ export default function PhotoBoothPage() {
             )}
           </div>
 
-          {/* Bottom Shutter Bar */}
-          <div className="flex flex-col items-center gap-3">
+          {/* Bottom Mode Selector + Shutter Bar */}
+          <div className="flex flex-col items-center gap-4">
+            {/* iOS Camera-style Mode Switcher */}
+            <div className="flex items-center gap-1 rounded-full bg-black/50 p-1 ring-1 ring-white/15 backdrop-blur-md">
+              <button
+                type="button"
+                onClick={() => setMode(1)}
+                className={`rounded-full px-4 py-1 text-xs font-semibold tracking-wider transition-all cursor-pointer ${
+                  mode === 1
+                    ? "bg-white/20 text-yellow-400"
+                    : "text-white/70 hover:text-white"
+                }`}
+              >
+                MODE 1
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode(2)}
+                className={`rounded-full px-4 py-1 text-xs font-semibold tracking-wider transition-all cursor-pointer ${
+                  mode === 2
+                    ? "bg-white/20 text-yellow-400"
+                    : "text-white/70 hover:text-white"
+                }`}
+              >
+                MODE 2
+              </button>
+            </div>
+
             <button
               type="button"
               aria-label="Take 4 photos"
