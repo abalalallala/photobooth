@@ -20,11 +20,9 @@ export default function PhotoBoothPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const isMountedRef = useRef<boolean>(true);
   const captureCancelRef = useRef<boolean>(false);
-  const filterEnabledRef = useRef<boolean>(true);
 
   const [cameraState, setCameraState] = useState<CameraState>("initializing");
   const [phase, setPhase] = useState<BoothPhase>("camera");
-  const [filterEnabled, setFilterEnabled] = useState<boolean>(true);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [countdownKey, setCountdownKey] = useState<number>(0);
   const [currentShot, setCurrentShot] = useState<number>(0);
@@ -32,10 +30,6 @@ export default function PhotoBoothPage() {
   const [stripUrl, setStripUrl] = useState<string | null>(null);
   const [stripFile, setStripFile] = useState<File | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<boolean>(false);
-
-  useEffect(() => {
-    filterEnabledRef.current = filterEnabled;
-  }, [filterEnabled]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -106,7 +100,7 @@ export default function PhotoBoothPage() {
     };
   }, [requestCameraStream, stopStream]);
 
-  // Initialize WebGL Dropper Filter Renderer and animation loop
+  // Initialize WebGL renderer and animation loop
   useEffect(() => {
     const canvas = glCanvasRef.current;
     if (!canvas) return;
@@ -117,10 +111,7 @@ export default function PhotoBoothPage() {
     let rafId = 0;
     const renderLoop = () => {
       if (videoRef.current && videoRef.current.readyState >= 2) {
-        renderer.render(
-          videoRef.current,
-          filterEnabledRef.current ? 1.0 : 0.0
-        );
+        renderer.render(videoRef.current);
       }
       rafId = requestAnimationFrame(renderLoop);
     };
@@ -160,7 +151,7 @@ export default function PhotoBoothPage() {
     const video = videoRef.current;
 
     if (video && rendererRef.current && video.readyState >= 2) {
-      rendererRef.current.render(video, filterEnabledRef.current ? 1.0 : 0.0);
+      rendererRef.current.render(video);
     }
 
     const canvas = document.createElement("canvas");
@@ -189,7 +180,6 @@ export default function PhotoBoothPage() {
         sy = (shTotal - sh) / 2;
       }
 
-      // glCanvas is already mirrored and warped with the 胶头滴管 effect
       ctx.drawImage(glCanvas, sx, sy, sw, sh, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
       return canvas;
     }
@@ -238,11 +228,9 @@ export default function PhotoBoothPage() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return null;
 
-      // White photo strip background and borders
       ctx.fillStyle = "#FFFFFF";
       ctx.fillRect(0, 0, stripWidth, stripHeight);
 
-      // Draw each of the 4 photos vertically
       frames.forEach((frame, index) => {
         const x = STRIP_BORDER;
         const y = STRIP_BORDER + index * (FRAME_HEIGHT + STRIP_GAP);
@@ -283,7 +271,6 @@ export default function PhotoBoothPage() {
       if (captureCancelRef.current || !isMountedRef.current) return;
       setCurrentShot(shot);
 
-      // 3 - 2 - 1 countdown before each photo
       for (const count of [3, 2, 1]) {
         if (captureCancelRef.current || !isMountedRef.current) return;
         setCountdown(count);
@@ -294,7 +281,6 @@ export default function PhotoBoothPage() {
       if (captureCancelRef.current || !isMountedRef.current) return;
       setCountdown(null);
 
-      // Flash the screen white & capture the frame
       setIsFlashing(true);
       const frame = captureSingleFrame();
       if (frame) {
@@ -305,7 +291,6 @@ export default function PhotoBoothPage() {
       if (!isMountedRef.current) return;
       setIsFlashing(false);
 
-      // Brief pause between shots
       if (shot < TOTAL_SHOTS) {
         await sleep(420);
       } else {
@@ -377,7 +362,6 @@ export default function PhotoBoothPage() {
           });
           return;
         } catch (err) {
-          // If the user dismissed the iOS share sheet, do not fall back to download
           if (err instanceof Error && err.name === "AbortError") {
             return;
           }
@@ -385,7 +369,6 @@ export default function PhotoBoothPage() {
       }
     }
 
-    // On a laptop (or if Web Share with files is unavailable), download the image directly
     triggerDownload(stripUrl);
   }, [stripUrl, stripFile, triggerDownload]);
 
@@ -400,7 +383,7 @@ export default function PhotoBoothPage() {
         className="pointer-events-none fixed top-0 left-0 h-px w-px opacity-0"
       />
 
-      {/* Live WebGL Canvas with automatic 胶头滴管 (Rubber-Bulb Dropper) face filter */}
+      {/* Live WebGL Canvas */}
       <canvas
         ref={glCanvasRef}
         className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ${
@@ -516,33 +499,19 @@ export default function PhotoBoothPage() {
             paddingRight: "max(env(safe-area-inset-right, 0px), 20px)",
           }}
         >
-          {/* Top Status Pill & Filter Toggle */}
+          {/* Top Status Pill */}
           <div className="flex flex-col items-center gap-2.5">
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2.5 rounded-full bg-black/45 px-4 py-1.5 text-xs font-medium tracking-wide text-white/95 ring-1 ring-white/15 backdrop-blur-md">
-                {phase === "capturing" ? (
-                  <>
-                    <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                    <span>
-                      Photo {currentShot} of {TOTAL_SHOTS}
-                    </span>
-                  </>
-                ) : (
-                  <span>4-POSE PHOTO STRIP</span>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setFilterEnabled((v) => !v)}
-                className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-all backdrop-blur-md cursor-pointer ${
-                  filterEnabled
-                    ? "bg-yellow-400/90 text-black shadow-sm"
-                    : "bg-black/45 text-white/75 ring-1 ring-white/15"
-                }`}
-              >
-                {filterEnabled ? "💧 胶头滴管: 开" : "💧 胶头滴管: 关"}
-              </button>
+            <div className="flex items-center gap-2.5 rounded-full bg-black/45 px-4 py-1.5 text-xs font-medium tracking-wide text-white/95 ring-1 ring-white/15 backdrop-blur-md">
+              {phase === "capturing" ? (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                  <span>
+                    Photo {currentShot} of {TOTAL_SHOTS}
+                  </span>
+                </>
+              ) : (
+                <span>4-POSE PHOTO STRIP</span>
+              )}
             </div>
 
             {/* 4-Shot Progress Dots */}

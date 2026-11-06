@@ -29,7 +29,6 @@ attribute vec2 a_position;
 varying vec2 v_uv;
 
 void main() {
-  // Map clip space (-1..1) to top-left origin UV (0..1)
   v_uv = vec2(a_position.x * 0.5 + 0.5, 0.5 - a_position.y * 0.5);
   gl_Position = vec4(a_position, 0.0, 1.0);
 }
@@ -42,13 +41,12 @@ varying vec2 v_uv;
 uniform sampler2D u_video;
 uniform vec2 u_resolution;
 uniform vec2 u_cropScale;
-uniform float u_intensity;
 uniform int u_faceCount;
 uniform vec4 u_faces[${MAX_FACES}];  // (cx, cy, rx, ry)
 uniform vec4 u_eyes[${MAX_FACES}];   // (leftEyeLx, leftEyeLy, rightEyeLx, rightEyeLy)
 uniform float u_angles[${MAX_FACES}];
 
-vec2 warpSingleFace(vec2 pos, vec4 face, vec4 eyes, float angle, float intensity) {
+vec2 warpSingleFace(vec2 pos, vec4 face, vec4 eyes, float angle) {
   vec2 center = face.xy;
   float rx = max(face.z, 1.0);
   float ry = max(face.w, 1.0);
@@ -65,52 +63,47 @@ vec2 warpSingleFace(vec2 pos, vec4 face, vec4 eyes, float angle, float intensity
   float lx = dot(rel, rightVec) / rx;
   float ly = dot(rel, downVec) / ry;
 
-  if (abs(lx) > 2.6 || ly < -2.2 || ly > 2.3) {
+  if (abs(lx) > 2.6 || ly < -2.2 || ly > 2.5) {
     return pos;
   }
 
   float srcLx = lx;
   float srcLy = ly;
 
-  // 1. Subtle Hair Crown Fullness only high above forehead (ly ~ -0.85)
-  // Keeps forehead, eyebrows, and glasses natural without balloon distortion
-  vec2 dCrown = vec2(lx, ly - (-0.85));
-  float crownDist2 = (dCrown.x * dCrown.x) / (1.35 * 1.35) + (dCrown.y * dCrown.y) / (0.85 * 0.85);
-  float crownEnv = exp(-crownDist2) * smoothstep(-0.20, -0.55, ly);
-  srcLx -= dCrown.x * (0.10 * intensity) * crownEnv;
-  srcLy -= dCrown.y * (0.15 * intensity) * crownEnv;
+  // 1. Keep upper head/forehead slightly sleek so the head never looks oversized
+  float upperSleekEnv = exp(-pow(lx / 1.25, 2.0) - pow((ly - (-0.35)) / 0.65, 2.0)) * smoothstep(0.15, -0.25, ly);
+  srcLx += lx * 0.08 * upperSleekEnv;
 
-  // 2. Smooth Continuous V-Cone Taper from below eyes (ly = 0.04) down to chin (ly = 1.0) & neck
-  // Gradual onset below the eye line so glasses/eyes blend seamlessly into the tapered lower face
-  float taperRamp = smoothstep(0.04, 0.92, ly) * (1.0 - smoothstep(1.08, 1.85, ly));
-  // Strong lower-cheek, jaw-corner (gonion), and chin pinch
-  float jawChinFocus = exp(-pow((ly - 0.84) / 0.42, 2.0));
-  // Wide horizontal capture envelope so outer jawlines (|lx| = 1.0) pull all the way in to |lx| ~ 0.40
+  // 2. Vertical Face Elongation & Long Pointed V-Chin
+  // Subtracting from srcLy pulls mid/lower-face features downward to make the face noticeably longer,
+  // with extra downward pull along the center line (lx = 0) for a sharp pointed chin tip.
+  float lengthenEnv = exp(-pow(lx / 1.15, 2.0) - pow((ly - 0.88) / 0.68, 2.0)) * smoothstep(-0.04, 0.24, ly);
+  float centerTipWeight = exp(-pow(lx / 0.52, 2.0));
+  srcLy -= (0.14 + 0.15 * centerTipWeight) * lengthenEnv;
+
+  // 3. Smooth Continuous V-Cone Horizontal Taper along the elongated lower face
+  float effLy = srcLy;
+  float taperRamp = smoothstep(0.02, 0.90, effLy) * (1.0 - smoothstep(1.12, 1.90, effLy));
+  float jawChinFocus = exp(-pow((effLy - 0.86) / 0.44, 2.0));
   float xEnv = exp(-pow(lx / 1.18, 2.0));
 
-  float horizSqueeze = (1.15 * taperRamp + 0.62 * jawChinFocus) * xEnv * intensity;
+  float horizSqueeze = (1.18 * taperRamp + 0.64 * jawChinFocus) * xEnv;
   srcLx += lx * horizSqueeze;
 
-  // 3. Pointed V-Chin Lift & Compact Lower Face (缩下庭 + 锥子尖下巴)
-  // Pulls the lower jaw and chin upward while lifting jaw sides slightly more to form a sharp V-tip
-  float chinRegion = exp(-pow(lx / 1.02, 2.0) - pow((ly - 0.82) / 0.46, 2.0)) * smoothstep(0.12, 0.40, ly);
-  float sideSharpener = 0.18 + 0.14 * smoothstep(0.06, 0.52, abs(lx));
-  srcLy += sideSharpener * chinRegion * intensity;
+  // 4. Slender Nose Bridge & Nostrils
+  float noseEnv = exp(-pow(lx / 0.36, 2.0) - pow((effLy - 0.36) / 0.24, 2.0)) * smoothstep(0.05, 0.18, effLy);
+  srcLx += lx * 0.56 * noseEnv;
 
-  // 4. Slender Nose Bridge & Nostrils (瘦鼻梁鼻翼, below eye line ly > 0.12)
-  float noseEnv = exp(-pow(lx / 0.36, 2.0) - pow((ly - 0.36) / 0.22, 2.0)) * smoothstep(0.06, 0.18, ly);
-  srcLx += lx * (0.55 * intensity) * noseEnv;
-
-  // 5. Enlarged Expressive Eyes (自然大眼)
+  // 5. Enlarged Expressive Eyes
   vec2 dEyeL = vec2(lx - eyes.x, (ly - eyes.y) * (ry / rx));
   float eyeEnvL = exp(-dot(dEyeL, dEyeL) / (0.30 * 0.30));
-  srcLx -= (lx - eyes.x) * (0.22 * intensity) * eyeEnvL;
-  srcLy -= (ly - eyes.y) * (0.24 * intensity) * eyeEnvL;
+  srcLx -= (lx - eyes.x) * 0.22 * eyeEnvL;
+  srcLy -= (ly - eyes.y) * 0.24 * eyeEnvL;
 
   vec2 dEyeR = vec2(lx - eyes.z, (ly - eyes.w) * (ry / rx));
   float eyeEnvR = exp(-dot(dEyeR, dEyeR) / (0.30 * 0.30));
-  srcLx -= (lx - eyes.z) * (0.22 * intensity) * eyeEnvR;
-  srcLy -= (ly - eyes.w) * (0.24 * intensity) * eyeEnvR;
+  srcLx -= (lx - eyes.z) * 0.22 * eyeEnvR;
+  srcLy -= (ly - eyes.w) * 0.24 * eyeEnvR;
 
   return center + (srcLx * rx) * rightVec + (srcLy * ry) * downVec;
 }
@@ -118,17 +111,14 @@ vec2 warpSingleFace(vec2 pos, vec4 face, vec4 eyes, float angle, float intensity
 void main() {
   vec2 pos = v_uv * u_resolution;
 
-  if (u_intensity > 0.001) {
-    for (int i = 0; i < ${MAX_FACES}; i++) {
-      if (i < u_faceCount) {
-        pos = warpSingleFace(pos, u_faces[i], u_eyes[i], u_angles[i], u_intensity);
-      }
+  for (int i = 0; i < ${MAX_FACES}; i++) {
+    if (i < u_faceCount) {
+      pos = warpSingleFace(pos, u_faces[i], u_eyes[i], u_angles[i]);
     }
   }
 
   vec2 warpedUV = pos / u_resolution;
 
-  // Convert mirrored canvas UV (0..1) to cover-cropped source video UV (0..1)
   vec2 videoUV = vec2(
     0.5 + (0.5 - warpedUV.x) * u_cropScale.x,
     0.5 + (warpedUV.y - 0.5) * u_cropScale.y
@@ -163,7 +153,6 @@ export class DropperFilterRenderer {
 
   private uResolutionLoc: WebGLUniformLocation | null = null;
   private uCropScaleLoc: WebGLUniformLocation | null = null;
-  private uIntensityLoc: WebGLUniformLocation | null = null;
   private uFaceCountLoc: WebGLUniformLocation | null = null;
   private uFacesLoc: WebGLUniformLocation | null = null;
   private uEyesLoc: WebGLUniformLocation | null = null;
@@ -236,7 +225,6 @@ export class DropperFilterRenderer {
 
     this.uResolutionLoc = gl.getUniformLocation(program, "u_resolution");
     this.uCropScaleLoc = gl.getUniformLocation(program, "u_cropScale");
-    this.uIntensityLoc = gl.getUniformLocation(program, "u_intensity");
     this.uFaceCountLoc = gl.getUniformLocation(program, "u_faceCount");
     this.uFacesLoc = gl.getUniformLocation(program, "u_faces");
     this.uEyesLoc = gl.getUniformLocation(program, "u_eyes");
@@ -249,7 +237,6 @@ export class DropperFilterRenderer {
     try {
       const vision = await FilesetResolver.forVisionTasks("/wasm");
 
-      // Load 478-point FaceLandmarker for exact cheek, jaw, and chin tracking
       try {
         this.landmarker = await FaceLandmarker.createFromOptions(vision, {
           baseOptions: {
@@ -277,7 +264,6 @@ export class DropperFilterRenderer {
         return;
       }
     } catch {
-      // Fallback to lightweight FaceDetector if FaceLandmarker fails
       try {
         const vision = await FilesetResolver.forVisionTasks("/wasm");
         this.detector = await FaceDetector.createFromOptions(vision, {
@@ -383,14 +369,12 @@ export class DropperFilterRenderer {
               const leftEye = eyeA.x <= eyeB.x ? eyeA : eyeB;
               const rightEye = eyeA.x <= eyeB.x ? eyeB : eyeA;
 
-              // Down vector from eyeCenter (168) to chinTip (152)
               const toChinX = chinTip.x - eyeCenter.x;
               const toChinY = chinTip.y - eyeCenter.y;
               const ry = Math.max(28, Math.hypot(toChinX, toChinY));
 
               const downX = toChinX / ry;
               const downY = toChinY / ry;
-              // Right vector perpendicular to downVec
               let rightX = downY;
               let rightY = -downX;
               if (
@@ -404,7 +388,6 @@ export class DropperFilterRenderer {
 
               const angle = Math.atan2(rightY, rightX);
 
-              // Exact cheekbone width in canvas pixels
               const cheekWidth = Math.hypot(
                 cheekB.x - cheekA.x,
                 cheekB.y - cheekA.y
@@ -478,7 +461,6 @@ export class DropperFilterRenderer {
                   : eyeDist * 2.3;
 
                 const rx = Math.max(24, 0.5 * bboxCanvasW);
-                // Mouth is at ~0.68 of eye-to-chin distance
                 const ry = Math.max(28, eyeToMouth / 0.68);
 
                 const c = Math.cos(angle);
@@ -510,7 +492,6 @@ export class DropperFilterRenderer {
       }
     }
 
-    // Fallback default center face if no face seen recently
     if (this.smoothedFaces.length === 0 || now - this.lastFaceSeenAt > 1800) {
       const defaultRx = Math.min(cw, ch) * 0.23;
       const targetFallback: TrackedFace = {
@@ -547,7 +528,7 @@ export class DropperFilterRenderer {
     }
   }
 
-  public render(video: HTMLVideoElement, intensity = 1.0) {
+  public render(video: HTMLVideoElement) {
     const gl = this.gl;
     if (!gl || !this.program || !this.texture || video.readyState < 2) return;
 
@@ -584,7 +565,6 @@ export class DropperFilterRenderer {
 
     gl.uniform2f(this.uResolutionLoc, displayW, displayH);
     gl.uniform2f(this.uCropScaleLoc, scaleX, scaleY);
-    gl.uniform1f(this.uIntensityLoc, intensity);
 
     const faceCount = Math.min(this.smoothedFaces.length, MAX_FACES);
     gl.uniform1i(this.uFaceCountLoc, faceCount);
