@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { DropperFilterRenderer } from "./lib/dropperFilter";
 
 type CameraState = "initializing" | "ready" | "denied" | "error";
 type BoothPhase = "camera" | "capturing" | "results";
@@ -14,12 +15,16 @@ const STRIP_BOTTOM_BORDER = 96;
 
 export default function PhotoBoothPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rendererRef = useRef<DropperFilterRenderer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isMountedRef = useRef<boolean>(true);
   const captureCancelRef = useRef<boolean>(false);
+  const filterEnabledRef = useRef<boolean>(true);
 
   const [cameraState, setCameraState] = useState<CameraState>("initializing");
   const [phase, setPhase] = useState<BoothPhase>("camera");
+  const [filterEnabled, setFilterEnabled] = useState<boolean>(true);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [countdownKey, setCountdownKey] = useState<number>(0);
   const [currentShot, setCurrentShot] = useState<number>(0);
@@ -27,6 +32,10 @@ export default function PhotoBoothPage() {
   const [stripUrl, setStripUrl] = useState<string | null>(null);
   const [stripFile, setStripFile] = useState<File | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<boolean>(false);
+
+  useEffect(() => {
+    filterEnabledRef.current = filterEnabled;
+  }, [filterEnabled]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -97,6 +106,34 @@ export default function PhotoBoothPage() {
     };
   }, [requestCameraStream, stopStream]);
 
+  // Initialize WebGL Dropper Filter Renderer and animation loop
+  useEffect(() => {
+    const canvas = glCanvasRef.current;
+    if (!canvas) return;
+
+    const renderer = new DropperFilterRenderer(canvas);
+    rendererRef.current = renderer;
+
+    let rafId = 0;
+    const renderLoop = () => {
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        renderer.render(
+          videoRef.current,
+          filterEnabledRef.current ? 1.0 : 0.0
+        );
+      }
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    rafId = requestAnimationFrame(renderLoop);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      renderer.dispose();
+      rendererRef.current = null;
+    };
+  }, []);
+
   // Ensure video stays playing when returning to camera view
   useEffect(() => {
     if (phase === "camera" && videoRef.current && streamRef.current) {
@@ -119,11 +156,12 @@ export default function PhotoBoothPage() {
   }, [stripUrl]);
 
   const captureSingleFrame = useCallback((): HTMLCanvasElement | null => {
+    const glCanvas = glCanvasRef.current;
     const video = videoRef.current;
-    if (!video || video.readyState < 2) return null;
 
-    const vw = video.videoWidth || 1280;
-    const vh = video.videoHeight || 960;
+    if (video && rendererRef.current && video.readyState >= 2) {
+      rendererRef.current.render(video, filterEnabledRef.current ? 1.0 : 0.0);
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = FRAME_WIDTH;
@@ -131,8 +169,34 @@ export default function PhotoBoothPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
 
-    // Center-crop the video feed to 4:3 (FRAME_WIDTH x FRAME_HEIGHT)
     const targetAspect = FRAME_WIDTH / FRAME_HEIGHT;
+
+    if (glCanvas && glCanvas.width > 0 && glCanvas.height > 0) {
+      const swTotal = glCanvas.width;
+      const shTotal = glCanvas.height;
+      const srcAspect = swTotal / shTotal;
+
+      let sx = 0;
+      let sy = 0;
+      let sw = swTotal;
+      let sh = shTotal;
+
+      if (srcAspect > targetAspect) {
+        sw = shTotal * targetAspect;
+        sx = (swTotal - sw) / 2;
+      } else {
+        sh = swTotal / targetAspect;
+        sy = (shTotal - sh) / 2;
+      }
+
+      // glCanvas is already mirrored and warped with the 胶头滴管 effect
+      ctx.drawImage(glCanvas, sx, sy, sw, sh, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+      return canvas;
+    }
+
+    if (!video || video.readyState < 2) return null;
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 960;
     const videoAspect = vw / vh;
 
     let sx = 0;
@@ -148,7 +212,6 @@ export default function PhotoBoothPage() {
       sy = (vh - sh) / 2;
     }
 
-    // Mirror horizontally so the captured photo matches the front-camera preview
     ctx.save();
     ctx.translate(FRAME_WIDTH, 0);
     ctx.scale(-1, 1);
@@ -328,13 +391,19 @@ export default function PhotoBoothPage() {
 
   return (
     <main className="relative h-dvh w-screen overflow-hidden bg-black text-white">
-      {/* Live Front Camera Video (stays mounted for instant retake) */}
+      {/* Hidden source video element feeding the WebGL shader */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className={`absolute inset-0 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300 ${
+        className="pointer-events-none fixed top-0 left-0 h-px w-px opacity-0"
+      />
+
+      {/* Live WebGL Canvas with automatic 胶头滴管 (Rubber-Bulb Dropper) face filter */}
+      <canvas
+        ref={glCanvasRef}
+        className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ${
           cameraState === "ready" && phase !== "results"
             ? "opacity-100"
             : "opacity-0 pointer-events-none"
@@ -399,14 +468,19 @@ export default function PhotoBoothPage() {
               </p>
               <ol className="list-decimal space-y-2 pl-4 text-white/75">
                 <li>
-                  On iPhone, tap the <span className="font-medium text-white">Page Settings</span> icon (or{" "}
-                  <span className="font-medium text-white">aA</span>) in the
-                  Safari address bar and select{" "}
-                  <span className="font-medium text-white">Website Settings</span>.
+                  On iPhone, tap the{" "}
+                  <span className="font-medium text-white">Page Settings</span>{" "}
+                  icon (or <span className="font-medium text-white">aA</span>)
+                  in the Safari address bar and select{" "}
+                  <span className="font-medium text-white">
+                    Website Settings
+                  </span>
+                  .
                 </li>
                 <li>
                   Set <span className="font-medium text-white">Camera</span> to{" "}
-                  <span className="font-medium text-white">Allow</span> (or check{" "}
+                  <span className="font-medium text-white">Allow</span> (or
+                  check{" "}
                   <span className="font-medium text-white">
                     Settings → Safari → Camera
                   </span>
@@ -442,19 +516,33 @@ export default function PhotoBoothPage() {
             paddingRight: "max(env(safe-area-inset-right, 0px), 20px)",
           }}
         >
-          {/* Top Status Pill */}
+          {/* Top Status Pill & Filter Toggle */}
           <div className="flex flex-col items-center gap-2.5">
-            <div className="flex items-center gap-2.5 rounded-full bg-black/45 px-4 py-1.5 text-xs font-medium tracking-wide text-white/95 ring-1 ring-white/15 backdrop-blur-md">
-              {phase === "capturing" ? (
-                <>
-                  <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                  <span>
-                    Photo {currentShot} of {TOTAL_SHOTS}
-                  </span>
-                </>
-              ) : (
-                <span>4-POSE PHOTO STRIP</span>
-              )}
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5 rounded-full bg-black/45 px-4 py-1.5 text-xs font-medium tracking-wide text-white/95 ring-1 ring-white/15 backdrop-blur-md">
+                {phase === "capturing" ? (
+                  <>
+                    <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                    <span>
+                      Photo {currentShot} of {TOTAL_SHOTS}
+                    </span>
+                  </>
+                ) : (
+                  <span>4-POSE PHOTO STRIP</span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setFilterEnabled((v) => !v)}
+                className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-all backdrop-blur-md cursor-pointer ${
+                  filterEnabled
+                    ? "bg-yellow-400/90 text-black shadow-sm"
+                    : "bg-black/45 text-white/75 ring-1 ring-white/15"
+                }`}
+              >
+                {filterEnabled ? "💧 胶头滴管: 开" : "💧 胶头滴管: 关"}
+              </button>
             </div>
 
             {/* 4-Shot Progress Dots */}
