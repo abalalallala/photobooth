@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { DropperFilterRenderer } from "./lib/dropperFilter";
+import { DropperFilterRenderer, FILTER_VERSION } from "./lib/dropperFilter";
 
 type CameraState = "initializing" | "ready" | "denied" | "error";
 type BoothPhase = "camera" | "capturing" | "results";
@@ -102,6 +102,7 @@ export default function PhotoBoothPage() {
 
   // Initialize WebGL renderer and animation loop
   useEffect(() => {
+    void FILTER_VERSION;
     const canvas = glCanvasRef.current;
     if (!canvas) return;
 
